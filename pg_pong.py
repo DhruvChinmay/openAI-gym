@@ -4,24 +4,24 @@ import _pickle as pickle
 import gym
 
 # hyperparameters
-H = 50 # number of hidden layer neurons
+H = 100 # number of hidden layer neurons
 batch_size = 10 # every how many episodes to do a param update?
 learning_rate = 1e-4
 gamma = 0.99 # discount factor for reward
 decay_rate = 0.99 # decay factor for RMSProp leaky sum of grad^2
-resume = False # resume from previous checkpoint?
+resume = False
+ # resume from previous checkpoint?
 render = True
 
 # model initialization
-D = 80*80 # CHANGE TO 6 when I figure out
+D = 80*8 # input dimensionality: 80x80 grid
 if resume:
   model = pickle.load(open('save.p', 'rb'))
 else:
-    model = {}
-    model['W1'] = np.random.randn(H,D) / np.sqrt(D) # "Xavier" initialization         Add H,before 1st D
-    model['W2'] = np.random.randn(H) / np.sqrt(H) #revert back to H if doesn't work
-
-grad_buffer = { k : np.zeros_like(v) for k,v in model.items() }
+  model = {}
+  model['W1'] = np.random.randn(H,D) / np.sqrt(D) # "Xavier" initialization
+  model['W2'] = np.random.randn(H) / np.sqrt(H)
+grad_buffer = { k : np.zeros_like(v) for k,v in model.items() } # update buffers that add up gradients over a batch
 rmsprop_cache = { k : np.zeros_like(v) for k,v in model.items() } # rmsprop memory
 
 def sigmoid(x): 
@@ -31,53 +31,27 @@ def prepro(I):
   """ prepro 210x160x3 uint8 frame into 6400 (80x80) 1D float vector """
   I = I[35:195] # crop
   I = I[::2,::2,0] # downsample by factor of 2
-  
   I[I == 144] = 0 # erase background (background type 1)
   I[I == 109] = 0 # erase background (background type 2)
-  I[I == 213] = 5
-  I[I == 92] = 10
-  I[I == 236] = 236
-  paddle1_found = False
-  paddle2_found = False
-  ball_found = False
-  ballx = 0
-  bally = 0
-  paddle1y = 0
-  paddle2y = 0
-  pbally = 0
-  pballx = 0
-
-  for r, row in enumerate(I):
-    for c, pixel in enumerate(row):
-        if pixel == 5 and not paddle1_found:
-           paddle1y = r
-           paddle1_found = True
-           print("paddle1y:",paddle1y)
-        if pixel == 9 and not paddle2_found:
-           paddle2y = r
-           paddle2_found = True
-           print("paddle2y:",paddle2y)
-        if pixel == 236 and not ball_found:
-           bally = c
-           ballx = r
-           print("ball found")
-           ball_found = True
-           print("Ball coordinates:", bally,ballx)
-    '''velocity_x = ballx - pballx
-    velocity_y = bally - pbally'''
-    if ball_found == False:
-        print("BALL NOT FOUND")
-    if ball_found == True:
-        print("BALL FOUND")
-    print("(",ballx,",",bally,")") #Change to velocity_x / velocity_y when it is done
-    pbally = bally
-    pballx = ballx
-    a_1 = [ballx,bally,pballx,pbally,paddle1y,paddle2y,]
-    num = len(a_1)
-    print(num)
-         #pixel =1 # everything else (paddles, ball) just set to 1
-    np.savetxt('screen1.txt', I, fmt='%d')
-    return I.astype(np.float).ravel()
+  # I[I != 0] = 1 # everything else (paddles, ball) just set to 1
+  nonzeros = np.argwhere(I>0)
+  p1 = [81,8]
+  p2 = [81,70]
+  ball = [81,81]
+  for loc in nonzeros:
+    val = I[loc[0]][loc[1]]
+    if val == 213:
+      if loc[0] < p1[0] or loc[1] < p1[1]:
+        p1 = loc
+    elif val == 92:
+      if loc[0] < p2[0] or loc[1] < p2[1]:
+        p2 = loc
+    elif val == 236:
+      if loc[0] < ball[0] or loc[1] < ball[1]:
+        ball = loc
+  newI = np.array([p1[0], p2[0], ball[0], ball[1]])
+  #print newI
+  return newI.astype(np.float).ravel()
 
 def discount_rewards(r):
   """ take 1D float array of rewards and compute discounted reward """
@@ -104,6 +78,12 @@ def policy_backward(eph, epdlogp):
   dW1 = np.dot(dh.T, epx)
   return {'W1':dW1, 'W2':dW2}
 
+def array_in(arr, list_of_arr):
+     for elem in list_of_arr:
+        if (arr == elem).all():
+            return True
+     return False
+
 env = gym.make("Pong-v0")
 observation = env.reset()
 prev_x = None # used in computing the difference frame
@@ -116,8 +96,20 @@ while True:
 
   # preprocess the observation, set input to network to be difference image
   cur_x = prepro(observation)
-  x = cur_x - prev_x if prev_x is not None else np.zeros(D)
+  x = np.append(cur_x, prev_x) if prev_x is not None else np.zeros(8)
+  # x = [e/80 for e in x]
+  one_hot_x = [0]*(640)
+  for count, val in enumerate(x):
+    # print(count, val)
+    if (val > 80):
+      continue
+    one_hot_x[count*80+int(val)] = 1
   prev_x = cur_x
+
+  x = one_hot_x
+
+  # print (x)
+  # print ('---')
 
   # forward the policy network and sample an action from the returned probability
   aprob, h = policy_forward(x)
@@ -137,8 +129,7 @@ while True:
 
   if done: # an episode finished
     episode_number += 1
-
-
+    print("Episode", episode_number)
     # stack together all inputs, hidden states, action gradients, and rewards for this episode
     epx = np.vstack(xs)
     eph = np.vstack(hs)
@@ -158,7 +149,7 @@ while True:
 
     # perform rmsprop parameter update every batch_size episodes
     if episode_number % batch_size == 0:
-      for k,v in model.iteritems():
+      for k,v in model.items():
         g = grad_buffer[k] # gradient
         rmsprop_cache[k] = decay_rate * rmsprop_cache[k] + (1 - decay_rate) * g**2
         model[k] += learning_rate * g / (np.sqrt(rmsprop_cache[k]) + 1e-5)
@@ -166,11 +157,11 @@ while True:
 
     # boring book-keeping
     running_reward = reward_sum if running_reward is None else running_reward * 0.99 + reward_sum * 0.01
-    print ('resetting env. episode reward total was %f. running mean: %f' % (reward_sum, running_reward))
-    if episode_number % 100 == 0: pickle.dump(model, open('save.p', 'wb'))
+    print ('resetting env. episode reward total was {}. running mean: {}'.format(reward_sum, running_reward))
+    # print (model['W1'][0])
     reward_sum = 0
     observation = env.reset() # reset env
     prev_x = None
 
-  if reward != 0: # Pong has either +1 or -1 reward exactly when game ends.
-    print ('ep ' + str(episode_number) + ': game finished, reward: reward' + ('' if reward == -1 else ' !!!!!!!!'))
+  # if reward != 0: # Pong has either +1 or -1 reward exactly when game ends.
+  #   print ('ep %d: game finished, reward: %f' % (episode_number, reward)) + ('' if reward == -1 else ' !!!!!!!!')
